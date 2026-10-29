@@ -1,3 +1,4 @@
+import { PeekingCat } from '../components/Lottie';
 import {
   useEffect,
   useRef,
@@ -14,6 +15,7 @@ import {
   FileImage,
   ImagePlus,
   LoaderCircle,
+  PenLine,
   RefreshCcw,
   Sparkles,
   UploadCloud,
@@ -26,12 +28,15 @@ import {
 } from '../services/api';
 
 import { useApp } from '../context/useApp';
+import { formatDate, isAcceptedQualityResult, qualityLabel, qualityTone } from '../utils/format';
+import { qualityLabelText } from '../i18n/translations';
 
 
 const allowedTypes = [
   'image/jpeg',
   'image/png',
   'image/bmp',
+  'image/x-ms-bmp',
   'image/tiff',
 ];
 
@@ -43,11 +48,14 @@ export default function AnalyzePage() {
   const location = useLocation();
 
   const {
+    history,
     language,
     registerAnalysis,
     setLatestPreview,
     t,
   } = useApp();
+
+  const recentChecks = history.filter(isAcceptedQualityResult).slice(0, 4);
 
   const uploadRef = useRef(null);
   const videoRef = useRef(null);
@@ -200,7 +208,7 @@ export default function AnalyzePage() {
   // =========================================================
 
   function validateFile(nextFile) {
-    if (!nextFile) {
+    if (!nextFile || nextFile.size === 0) {
       return t('analyze.errNoFile');
     }
 
@@ -212,6 +220,11 @@ export default function AnalyzePage() {
       nextFile.type
       && !allowedTypes.includes(nextFile.type)
     ) {
+      return t('analyze.errType');
+    }
+
+    // A missing MIME type does not make an arbitrary file an image.
+    if (!/\.(jpe?g|png|bmp|tiff?)$/i.test(nextFile.name || '')) {
       return t('analyze.errType');
     }
 
@@ -230,7 +243,11 @@ export default function AnalyzePage() {
 
     const message = validateFile(nextFile);
 
+    // A newly selected file supersedes any in-flight handwriting request.
+    controllerRef.current?.abort();
+
     if (message) {
+      removeImage();
       setError(message);
       return;
     }
@@ -459,6 +476,7 @@ export default function AnalyzePage() {
   // =========================================================
 
   function removeImage() {
+    controllerRef.current?.abort();
     if (
       preview
       && preview.startsWith('blob:')
@@ -495,8 +513,8 @@ export default function AnalyzePage() {
 
     controllerRef.current?.abort();
 
-    controllerRef.current =
-      new AbortController();
+    const requestController = new AbortController();
+    controllerRef.current = requestController;
 
     try {
       /*
@@ -512,13 +530,20 @@ export default function AnalyzePage() {
           file,
           language,
           signal:
-            controllerRef.current.signal,
+            requestController.signal,
         });
 
-      const entry =
-        registerAnalysis(result);
+      if (requestController.signal.aborted || controllerRef.current !== requestController) return;
+      if (!result?.input_validation || !result?.quality_prediction) {
+        throw new Error('Invalid handwriting-analysis response.');
+      }
 
-      setStatus('success');
+      const entry =
+        await registerAnalysis(result);
+
+      if (requestController.signal.aborted || controllerRef.current !== requestController) return;
+
+      setStatus(isAcceptedQualityResult(result) ? 'success' : 'rejected');
 
       navigate(
         `/results/${entry.id}`,
@@ -526,11 +551,14 @@ export default function AnalyzePage() {
           state: {
             result,
             preview,
+            // Results creates its own object URL after this page unmounts.
+            previewFile: file,
           },
         },
       );
     } catch (err) {
-      if (err?.name === 'AbortError') {
+      if (err?.name === 'AbortError' || requestController.signal.aborted
+          || controllerRef.current !== requestController) {
         return;
       }
 
@@ -540,7 +568,7 @@ export default function AnalyzePage() {
       );
 
       setStatus('error');
-      setError(t('analyze.errGeneric'));
+      setError(t(err.code === 'history-too-large' ? 'account.historyTooLarge' : err.code === 'history-save-failed' ? 'account.saveError' : 'analyze.errGeneric'));
     }
   }
 
@@ -577,7 +605,7 @@ export default function AnalyzePage() {
   // =========================================================
 
   return (
-    <div className="analyze-page page-stack">
+    <div className="analyze-page page-stack gc hw">
 
       {/* =====================================================
           PAGE HEADER
@@ -613,7 +641,7 @@ export default function AnalyzePage() {
         </div>
       </section>
 
-      <div className="analyze-layout">
+      <div className={`analyze-layout gc-upload-grid ${recentChecks.length ? '' : 'solo'}`}>
 
         {/* ===================================================
             CAMERA / IMAGE UPLOAD
@@ -694,7 +722,7 @@ export default function AnalyzePage() {
 
           {!preview && !cameraOpen && (
             <div
-              className={`dropzone ${dragging ? 'dragging' : ''}`}
+              className={`dropzone has-peek ${dragging ? 'dragging' : ''}`}
               onDragOver={(event) => {
                 event.preventDefault();
                 setDragging(true);
@@ -704,6 +732,7 @@ export default function AnalyzePage() {
               }}
               onDrop={onDrop}
             >
+              <PeekingCat />
 
               <div className="upload-orbit">
                 {cameraStarting
@@ -850,6 +879,61 @@ export default function AnalyzePage() {
               NORMAL FILE PICKER
               ================================================= */}
 
+        {/* ===================================================
+              ERROR
+              =================================================== */}
+
+          {error && (
+            <div className="error-banner">
+
+              <XCircle size={19} />
+
+              <span>
+                {error}
+              </span>
+
+            </div>
+          )}
+
+
+          {/* ===================================================
+              ANALYSE BUTTON
+              =================================================== */}
+
+          <button
+            className="analyze-submit chunky-btn orange"
+            type="button"
+            disabled={
+              !file
+              || status === 'loading'
+              || !ready
+              || cameraOpen
+            }
+            onClick={submit}
+          >
+            {status === 'loading'
+              ? (
+                <>
+                  <LoaderCircle
+                    className="spin"
+                    size={20}
+                  />
+
+                  {t('analyze.checking')}
+                </>
+              )
+              : (
+                <>
+                  {t('analyze.submit')}
+
+                  <span>
+                    →
+                  </span>
+                </>
+              )}
+          </button>
+
+
           <input
             ref={uploadRef}
             type="file"
@@ -861,82 +945,24 @@ export default function AnalyzePage() {
         </section>
 
 
-        {/* ===================================================
-            PHOTO QUALITY TIP
-            =================================================== */}
 
-        <section className="analysis-note-card kid-photo-tips compact-photo-tip">
-
-          <div className="note-icon">
-            📷
-          </div>
-
-          <div>
-            <h4>
-              {t('analyze.bestPhoto')}
-            </h4>
-
-            <p>
-              {t('analyze.bestPhotoText')}
-            </p>
-          </div>
-
-        </section>
-
-
-        {/* ===================================================
-            ERROR
-            =================================================== */}
-
-        {error && (
-          <div className="error-banner">
-
-            <XCircle size={19} />
-
-            <span>
-              {error}
-            </span>
-
-          </div>
+        {!!recentChecks.length && (
+          <aside className="gc-side">
+            <section className="gc-card gc-recent">
+              <header className="gc-card-head"><h3>{t('progress.recentWriting')}</h3></header>
+              {recentChecks.map((item) => {
+                const label = qualityLabel(item);
+                return (
+                  <button key={item.id} type="button" className="gc-recent-row" onClick={() => navigate(`/results/${item.id}`)}>
+                    <span className="gc-recent-icon"><PenLine size={16} /></span>
+                    <span className="gc-recent-when">{formatDate(item.createdAt, language)}</span>
+                    <span className={`quality-pill tone-${qualityTone(label)}`}>{qualityLabelText(label, language)}</span>
+                  </button>
+                );
+              })}
+            </section>
+          </aside>
         )}
-
-
-        {/* ===================================================
-            ANALYSE BUTTON
-            =================================================== */}
-
-        <button
-          className="analyze-submit"
-          type="button"
-          disabled={
-            !file
-            || status === 'loading'
-            || !ready
-            || cameraOpen
-          }
-          onClick={submit}
-        >
-          {status === 'loading'
-            ? (
-              <>
-                <LoaderCircle
-                  className="spin"
-                  size={20}
-                />
-
-                {t('analyze.checking')}
-              </>
-            )
-            : (
-              <>
-                {t('analyze.submit')}
-
-                <span>
-                  →
-                </span>
-              </>
-            )}
-        </button>
 
       </div>
 

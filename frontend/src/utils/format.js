@@ -39,11 +39,34 @@ export function formatDate(dateValue, language = 'sinhala') {
   }).format(date);
 }
 
+// Plain numeric "YYYY.MM.DD, HH.MM" timestamp (no locale month names).
+export function formatDateNumeric(dateValue) {
+  const date = dateValue ? new Date(dateValue) : new Date();
+  const pad = (value) => String(value).padStart(2, '0');
+  const year = date.getFullYear();
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  const hours = pad(date.getHours());
+  const minutes = pad(date.getMinutes());
+  return `${year}.${month}.${day}, ${hours}.${minutes}`;
+}
+
 export function stageStatus(result) {
   return result?.input_validation?.status || result?.analysis_status || 'Unknown';
 }
 
+export function isBlockedQualityResult(result) {
+  return ['NON_HANDWRITING_INPUT', 'INPUT_RETAKE_REQUIRED',
+    'SEGMENTATION_UNRELIABLE', 'INSUFFICIENT_FEATURE_EVIDENCE', 'MODEL_ERROR']
+    .includes(result?.analysis_status)
+    || result?.input_validation?.valid_for_stage2 === false
+    || result?.segmentation_reliability?.reliable_for_stage2 === false
+    || result?.quality_prediction?.available === false
+    || result?.quality_prediction?.accepted === false;
+}
+
 export function qualityLabel(result) {
+  if (isBlockedQualityResult(result)) return null;
   const reported =
     result?.quality_prediction?.reported_label ||
     result?.quality_prediction?.final_label ||
@@ -56,6 +79,7 @@ export function qualityLabel(result) {
 }
 
 export function mostLikelyLabel(result) {
+  if (isBlockedQualityResult(result)) return null;
   return (
     result?.quality_prediction?.most_likely_label ||
     result?.quality_prediction?.predicted_label ||
@@ -71,7 +95,9 @@ export function analysisStatus(result) {
 
   // Low confidence is advisory only when the model still returned a label.
   if (reportedStatus === 'NEEDS_TEACHER_REVIEW' && label) return 'COMPLETED';
-  if (reportedStatus) return reportedStatus;
+  if (reportedStatus && reportedStatus !== 'COMPLETED') return reportedStatus;
+  if (result?.segmentation_reliability?.reliable_for_stage2 === false) return 'SEGMENTATION_UNRELIABLE';
+  if (result?.quality_prediction?.available === false) return 'MODEL_ERROR';
   if (result?.input_validation?.valid_for_stage2 === false) return 'INPUT_RETAKE_REQUIRED';
   if (label) return 'COMPLETED';
   return 'UNKNOWN';
@@ -127,6 +153,12 @@ export function friendlyStatus(result, language = 'sinhala') {
   }
   if (status === 'SEGMENTATION_UNRELIABLE') {
     return { tone: 'retake', title: translate(language, 'status.segTitle'), text: translate(language, 'status.segText') };
+  }
+  if (status === 'NON_HANDWRITING_INPUT') {
+    return { tone: 'retake', title: translate(language, 'status.nonWritingTitle'), text: translate(language, 'status.nonWritingText') };
+  }
+  if (status === 'INSUFFICIENT_FEATURE_EVIDENCE') {
+    return { tone: 'review', title: translate(language, 'status.featureTitle'), text: translate(language, 'status.featureText') };
   }
   if (status === 'INPUT_RETAKE_REQUIRED') {
     return { tone: 'retake', title: translate(language, 'status.inputTitle'), text: translate(language, 'status.inputText') };

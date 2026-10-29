@@ -12,3 +12,8 @@ uploads
 venv
 node_modules
 models
+backend/.sessions/
+dist
+
+# Firebase/Google service-account key files (credentials, never commit)
+backend/*.json

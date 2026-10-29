@@ -1,51 +1,65 @@
 import { useEffect, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useApp } from '../context/useApp';
 import StudentGate from '../components/fluencyProfiling/Studentgate';
-import Dashboard from '../components/fluencyProfiling/Dashboard';
 import PickerStage from '../components/fluencyProfiling/Pickerstage';
 import SentenceStage from '../components/fluencyProfiling/Sentencestage';
 import RecordStage from '../components/fluencyProfiling/Recordstage';
 import CustomStage from '../components/fluencyProfiling/Customstage';
 import ResultsStage from '../components/fluencyProfiling/Resultsstage';
-import { LanguageProvider, useLanguage } from '../context/FluencyLanguageContext';
-import { submitAssessment, submitCustomAssessment, fetchProfile } from '../components/fluencyProfiling/api';
-import EmptyState from '../components/EmptyState';
-import '../fluencyProfiling.css';
+import PracticeRecordStage from '../components/fluencyProfiling/PracticeRecordStage';
+import PlanProgressStage from '../components/fluencyProfiling/PlanProgressStage';
+import { LanguageProvider } from '../context/FluencyLanguageContext';
+import { submitAssessment, submitCustomAssessment } from '../components/fluencyProfiling/api';
 
-// gate -> dashboard -> picker -> (sentence -> record | custom) -> results -> dashboard
-// Adapted near-verbatim from the standalone project's own App.jsx (same
-// state machine, same handlers) -- the only real changes are: no
-// standalone <LanguageSwitcher/> (WriteBright's own header toggle drives
-// this page instead, via the sync effect below) and the .fluency-scope/
-// lang wrapper (see fluencyProfiling.css) instead of a bare <main className="app">.
+// gate -> picker -> (sentence -> record | custom) -> results
+// Every screen uses the app's own .gc / .fl styling (bhasha.css). The
+// app's header language toggle drives the language (FluencyLanguageContext).
+//
+// A second entry path exists for "කියවුම් පුහුණුව" (reading practice,
+// see ReadingPracticePlanPage.jsx / ReadingPracticeActivityPage.jsx):
+// navigating here with router state `{ planActivity: { planId,
+// planIndex, activity } }` skips straight to recording that activity's
+// exact practice sentence (plan-record), and submitting shows
+// PlanProgressStage instead of the normal ResultsStage (plan-results).
+// Visiting /fluency normally (no state) is completely unaffected.
 function FluencyPageInner() {
-  const { language: appLanguage, registerFluencyRun } = useApp(); // 'sinhala' | 'tamil', from WriteBright's global toggle
-  const { lang, setLang, t } = useLanguage();
+  const { language: appLanguage, registerFluencyRun, createFluencyPlan, activeChild, t: appT } = useApp();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const planActivity = location.state?.planActivity || null;
+  // Matches FluencyLanguageContext.jsx's own mapping -- keeps the backend's
+  // LLM feedback text in the same script as the rest of the page.
+  const llmLang = appLanguage === 'tamil' ? 'ta' : 'si';
 
-  // Keeps this component's own LanguageContext (used internally by every
-  // stage component below) in lockstep with WriteBright's global language
-  // toggle, instead of requiring a second, separate language control on
-  // this page. This component supports 'en' too (its own LanguageContext
-  // has 3 languages), but WriteBright's global toggle only ever offers
-  // 'sinhala'/'tamil' -- so 'en' is simply never reachable here, same as
-  // the grammar-check component.
-  useEffect(() => {
-    setLang(appLanguage === 'tamil' ? 'ta' : 'si');
-  }, [appLanguage, setLang]);
-
-  const [screen, setScreen] = useState('gate');
-  const [studentId, setStudentId] = useState('');
+  const [screen, setScreen] = useState(planActivity ? 'plan-record' : 'gate');
   const [sentence, setSentence] = useState(null);
-
   const [result, setResult] = useState(null);
   const [audioUrl, setAudioUrl] = useState(null);
   const audioUrlRef = useRef(null);
-
-  const [profileLoading, setProfileLoading] = useState(false);
-  const [profileLoadError, setProfileLoadError] = useState(false);
+  useEffect(() => () => { if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current); }, []);
 
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
+  // Guards against creating a duplicate plan if the student clicks
+  // "Start Reading Practice" on more than one of the same result's 5
+  // recommendation cards -- all 5 share one plan.
+  const [planIdForResult, setPlanIdForResult] = useState(null);
+
+  // FluencyPageInner stays mounted across navigations to this same
+  // route (e.g. PlanProgressStage's "next activity" button), so the
+  // initial useState above only handles the very first render -- this
+  // re-syncs the screen whenever a NEW navigation lands here, keyed off
+  // location.key (changes on every navigate() call, even to the same
+  // path) so it never fires on the plain in-page setScreen() calls used
+  // by the rest of this component.
+  useEffect(() => {
+    setScreen(planActivity ? 'plan-record' : 'gate');
+    setResult(null);
+    setPlanIdForResult(null);
+    updateAudioUrl(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.key]);
 
   function updateAudioUrl(blob) {
     if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
@@ -54,32 +68,20 @@ function FluencyPageInner() {
     setAudioUrl(url);
   }
 
-  async function handleStart(id) {
-    setStudentId(id);
+  function errorKey(err) {
+    if (err.code === 'history-too-large') return 'account.historyTooLarge';
+    if (err.code === 'history-save-failed') return 'account.saveError';
+    return 'account.analysisError';
+  }
+
+  // "ඇගයීම ආරම්භ කරන්න" starts a fresh session: straight to choosing the
+  // assessment method. Earlier results stay in History / Progress.
+  function handleStart() {
     setSubmitError('');
-
-    if (!id) {
-      setResult(null);
-      updateAudioUrl(null);
-      setProfileLoadError(false);
-      setScreen('dashboard');
-      return;
-    }
-
-    setScreen('dashboard');
-    setProfileLoading(true);
-    setProfileLoadError(false);
-    try {
-      const data = await fetchProfile(id);
-      setResult(data);
-      updateAudioUrl(null); // saved profiles don't carry audio back
-      setProfileLoadError(false);
-    } catch {
-      setResult(null);
-      setProfileLoadError(true);
-    } finally {
-      setProfileLoading(false);
-    }
+    setResult(null);
+    setPlanIdForResult(null);
+    updateAudioUrl(null);
+    setScreen('picker');
   }
 
   function handleSentenceSelect(s) {
@@ -95,14 +97,16 @@ function FluencyPageInner() {
       const data = await submitAssessment({
         audioBlob: blob,
         sentenceId: sentence.sentence_id,
-        studentId,
+        studentId: '', // Child history is stored privately in Firestore, not the public backend.
+        lang: llmLang,
       });
       setResult(data);
+      setPlanIdForResult(null);
       updateAudioUrl(blob);
-      registerFluencyRun(data, studentId, appLanguage);
+      await registerFluencyRun(data, activeChild.id, appLanguage);
       setScreen('results');
     } catch (err) {
-      setSubmitError(err.message || 'Assessment failed. Try again.');
+      setSubmitError(appT(errorKey(err)));
     } finally {
       setSubmitting(false);
     }
@@ -115,178 +119,105 @@ function FluencyPageInner() {
       const data = await submitCustomAssessment({
         audioBlob,
         groundTruth,
-        studentId,
+        studentId: '', // Child history is stored privately in Firestore, not the public backend.
+        lang: llmLang,
       });
       setResult(data);
+      setPlanIdForResult(null);
       updateAudioUrl(audioBlob);
-      registerFluencyRun(data, studentId, appLanguage);
+      await registerFluencyRun(data, activeChild.id, appLanguage);
       setScreen('results');
     } catch (err) {
-      setSubmitError(err.message || 'Assessment failed. Try again.');
+      setSubmitError(appT(errorKey(err)));
     } finally {
       setSubmitting(false);
     }
   }
 
-  // The gate/start screen now uses WriteBright's own page styling (see
-  // Studentgate.jsx) so it isn't wrapped in .app.fluency-scope -- that
-  // wrapper's own background/font-family (fluencyProfiling.css) would
-  // otherwise repaint it with this component's separate palette instead
-  // of the app's own colors/fonts, the same fix already made for the
-  // grammar-check component's upload screen. Every other stage keeps its
-  // existing look for now, still wrapped as before.
-  if (screen === 'gate') {
-    return <StudentGate onStart={handleStart} />;
+  // "කියවුම් පුහුණුව ආරම්භ කරන්න" on a recommendation card: freezes this
+  // result's 5 recommendations into one plan (reused if the student
+  // clicks a different card from the same result) and sends them to the
+  // practice page's history/list.
+  async function handleStartPractice() {
+    if (!result?.recommendations?.length) return;
+    setSubmitError('');
+    try {
+      let planId = planIdForResult;
+      if (!planId) {
+        const plan = await createFluencyPlan(result.recommendations, appLanguage);
+        planId = plan.id;
+        setPlanIdForResult(planId);
+      }
+      navigate('/fluency-practice');
+    } catch {
+      setSubmitError(appT('account.saveError'));
+    }
   }
 
-  // Same fix as the gate screen, applied to Dashboard's own "welcome
-  // back, no result yet" sub-state (the one actually shown right after
-  // the gate) -- pulled outside .app.fluency-scope and rebuilt with
-  // WriteBright's own EmptyState component (the same one Home/History use
-  // for their empty states), instead of Dashboard.jsx's fluencyProfiling-
-  // styled markup. The "loading" and "has a result" sub-states of this
-  // same screen keep their existing look for now (still rendered via
-  // <Dashboard> below, still wrapped) -- ProfileSummary's charts are a
-  // bigger restyle than this pass covers.
-  if (screen === 'dashboard' && !profileLoading && !result) {
-    return (
-      <div className="page-stack">
-        <div className="section-heading" style={{ justifyContent: 'center', gap: 20 }}>
-          <span style={{ color: 'var(--muted)', fontSize: 15 }}>
-            {studentId ? `${t('dashboard.studentPrefix')} ${studentId}` : t('dashboard.anonymous')}
-          </span>
-          {/* Matches "ඇගයීම ආරම්භ කරන්න" (.primary-action)'s actual
-              computed size exactly -- fontSize/padding/borderRadius/
-              fontWeight, measured live rather than assumed, since
-              .primary-action is itself still affected by the unscoped
-              "compact" block elsewhere in styles.css. */}
-          <button
-            type="button"
-            style={{ fontSize: 12, padding: '11px 17px', borderRadius: 30, fontWeight: 800 }}
-            onClick={() => {
-              setStudentId('');
-              setResult(null);
-              updateAudioUrl(null);
-              setProfileLoadError(false);
-              setScreen('gate');
-            }}
-          >
-            {t('dashboard.switchStudent')}
-          </button>
-        </div>
-
-        <EmptyState
-          className="empty-state--lg"
-          title={t('dashboard.welcomeBack')}
-          text={profileLoadError ? t('dashboard.noProfileFound') : t('dashboard.emptyBody')}
-          action={
-            // .soft-btn.orange, not .primary-action -- matches the gate
-            // screen's own "ඇගයීම ආරම්භ කරන්න" button (Studentgate.jsx)
-            // exactly (font-size:16px, padding:12px 15px, auto width)
-            // instead of .primary-action's width:100% + the unscoped
-            // "compact" override elsewhere in styles.css that was
-            // shrinking it to font-size:12px. Both buttons carry the same
-            // label, so they should read as the same size everywhere on
-            // this page.
-            <button
-              className="soft-btn orange"
-              style={{ justifyContent: 'center' }}
-              onClick={() => {
-                setSubmitError('');
-                setScreen('picker');
-              }}
-            >
-              ▶ {t('dashboard.startBtn')}
-            </button>
-          }
-        />
-      </div>
-    );
+  // Submitting a recording for one activity inside a practice plan --
+  // always a custom (free-text) assessment, since the activity's
+  // practice_sentence isn't one of the 68 bank sentences.
+  async function handlePlanSubmit(audioBlob) {
+    setSubmitting(true);
+    setSubmitError('');
+    try {
+      const data = await submitCustomAssessment({
+        audioBlob,
+        groundTruth: planActivity.activity.practice_sentence,
+        studentId: '',
+        lang: llmLang,
+      });
+      setResult(data);
+      updateAudioUrl(audioBlob);
+      await registerFluencyRun(data, activeChild.id, appLanguage, {
+        planId: planActivity.planId,
+        planIndex: planActivity.planIndex,
+      });
+      setScreen('plan-results');
+    } catch (err) {
+      setSubmitError(appT(errorKey(err)));
+    } finally {
+      setSubmitting(false);
+    }
   }
 
-  // Same fix as gate/dashboard-empty above -- pulled outside
-  // .app.fluency-scope so PickerStage.jsx's own WriteBright-styled
-  // markup isn't repainted by this component's separate palette.
-  if (screen === 'picker') {
+  if (screen === 'plan-record' && planActivity) {
     return (
-      <PickerStage
-        onPickList={() => setScreen('sentence')}
-        onPickCustom={() => setScreen('custom')}
-        onBack={() => setScreen('dashboard')}
-      />
-    );
-  }
-
-  // Same fix again -- pulled outside .app.fluency-scope so
-  // Sentencestage.jsx's own WriteBright-styled markup isn't repainted by
-  // this component's separate palette.
-  if (screen === 'sentence') {
-    return (
-      <SentenceStage onSelect={handleSentenceSelect} onBack={() => setScreen('picker')} />
-    );
-  }
-
-  // CustomStage.jsx now owns its own scoping per internal step (its
-  // 'text' step is unscoped/WriteBright-styled like the screens above;
-  // its 'capture' step wraps itself in a local .fluency-scope div) --
-  // pulled out here the same way, and submitError is now passed down
-  // instead of being rendered alongside it by this file.
-  if (screen === 'custom') {
-    return (
-      <CustomStage
-        onSubmit={handleCustomSubmit}
-        onBack={() => setScreen('picker')}
+      <PracticeRecordStage
+        activity={planActivity.activity}
+        onSubmit={handlePlanSubmit}
+        onBack={() => navigate(`/fluency-practice/${planActivity.planId}`)}
         submitting={submitting}
         submitError={submitError}
       />
     );
   }
-
-  return (
-    <main className="app fluency-scope" lang={lang}>
-      {screen === 'dashboard' && (
-        <Dashboard
-          studentId={studentId}
-          result={result}
-          audioUrl={audioUrl}
-          loading={profileLoading}
-          loadError={profileLoadError}
-          onStart={() => {
-            setSubmitError('');
-            setScreen('picker');
-          }}
-          onSwitchStudent={() => {
-            setStudentId('');
-            setResult(null);
-            updateAudioUrl(null);
-            setProfileLoadError(false);
-            setScreen('gate');
-          }}
-        />
-      )}
-
-      {screen === 'record' && (
-        <>
-          <RecordStage
-            sentence={sentence}
-            onSubmit={handleAudioSubmit}
-            onBack={() => setScreen('sentence')}
-            submitting={submitting}
-          />
-          {submitError && <p className="hint hint--error">{submitError}</p>}
-        </>
-      )}
-
-      {screen === 'results' && result && (
-        <ResultsStage
-          result={result}
-          audioUrl={audioUrl}
-          onRecordAnother={() => setScreen('picker')}
-          onBackToDashboard={() => setScreen('dashboard')}
-        />
-      )}
-    </main>
-  );
+  if (screen === 'plan-results' && result && planActivity) {
+    return (
+      <PlanProgressStage
+        result={result}
+        audioUrl={audioUrl}
+        planId={planActivity.planId}
+        planIndex={planActivity.planIndex}
+      />
+    );
+  }
+  if (screen === 'picker') {
+    return <PickerStage onPickList={() => setScreen('sentence')} onPickCustom={() => setScreen('custom')} onBack={() => setScreen('gate')} />;
+  }
+  if (screen === 'sentence') {
+    return <SentenceStage onSelect={handleSentenceSelect} onBack={() => setScreen('picker')} />;
+  }
+  if (screen === 'record' && sentence) {
+    return <RecordStage sentence={sentence} onSubmit={handleAudioSubmit} onBack={() => setScreen('sentence')} submitting={submitting} submitError={submitError} />;
+  }
+  if (screen === 'custom') {
+    return <CustomStage onSubmit={handleCustomSubmit} onBack={() => setScreen('picker')} submitting={submitting} submitError={submitError} />;
+  }
+  if (screen === 'results' && result) {
+    return <ResultsStage result={result} audioUrl={audioUrl} onRecordAnother={() => setScreen('picker')} onBackToDashboard={() => setScreen('gate')} onStartPractice={handleStartPractice} />;
+  }
+  return <StudentGate onStart={handleStart} />;
 }
 
 export default function FluencyPage() {
