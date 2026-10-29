@@ -118,40 +118,6 @@ The platform integrates multiple literacy assessment components through a web-ba
 
 ---
 
-## 📂 Repository Structure
-
-```text
-R26-DS-009/
-│
-├── backend/
-│   ├── app.py
-│   ├── family_store.py
-│   ├── fluency_router.py
-│   ├── google_accounts.py
-│   ├── grammar_router.py
-│   ├── reading_error_router.py
-│   ├── fluency_profiling/
-│   ├── grammar_check/
-│   ├── handwriting_Qlty/
-│   ├── reading_error/
-│   ├── tests/
-│   └── requirements.txt
-│
-├── frontend/
-│   ├── src/
-│   ├── tests/
-│   ├── index.html
-│   ├── package.json
-│   ├── vite.config.js
-│   └── README.md
-│
-├── firebase.json
-├── firestore.rules
-└── README.md
-```
-
----
-
 ## 🎯 Project Objectives
 
 - ✍️ Support the assessment and improvement of children's handwriting skills.
